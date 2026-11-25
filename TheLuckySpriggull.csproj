@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>TheLuckySpriggull</AssemblyName>
+    <RootNamespace>LuckySpriggull</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GameDir>$(MSBuildThisFileDirectory)..\..\</GameDir>
+    <Managed>$(GameDir)A Township Tale_Data\Managed\</Managed>
+    <!-- Compile against the game's own Mono framework assemblies (no NuGet targeting pack needed). -->
+    <FrameworkPathOverride>$(Managed)</FrameworkPathOverride>
+    <DisableImplicitFrameworkReferences>true</DisableImplicitFrameworkReferences>
+    <NoStdLib>true</NoStdLib>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="mscorlib"><HintPath>$(Managed)mscorlib.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="System"><HintPath>$(Managed)System.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="System.Core"><HintPath>$(Managed)System.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="netstandard"><HintPath>$(Managed)netstandard.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Root.Township"><HintPath>$(Managed)Root.Township.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="$(Managed)Alta*.dll" Private="false" />
+    <Reference Include="$(Managed)UnityEngine.dll" Private="false" />
+    <Reference Include="$(Managed)UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="$(Managed)UnityEngine.PhysicsModule.dll" Private="false" />
+    <Reference Include="MelonLoader"><HintPath>$(GameDir)MelonLoader\net35\MelonLoader.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="0Harmony"><HintPath>$(GameDir)MelonLoader\net35\0Harmony.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+
+  <!--
+    Optional: copy the built DLL into your own Mods folders after a Release build.
+    Create LocalPaths.props next to this file (it is not uploaded) with, for example:
+      <Project><PropertyGroup>
+        <ClientPackDir>path\to\your\game\Mods\</ClientPackDir>
+        <ServerModsDir>path\to\your\server\Mods\</ServerModsDir>
+      </PropertyGroup></Project>
+  -->
+  <Import Project="LocalPaths.props" Condition="Exists('LocalPaths.props')" />
+  <Target Name="InstallMod" AfterTargets="Build" Condition="'$(Configuration)' == 'Release' And ('$(ClientPackDir)' != '' Or '$(ServerModsDir)' != '')">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ClientPackDir)" Condition="'$(ClientPackDir)' != '' And Exists('$(ClientPackDir)')" ContinueOnError="true" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ServerModsDir)" Condition="'$(ServerModsDir)' != '' And Exists('$(ServerModsDir)')" ContinueOnError="true" />
+    <Message Importance="high" Text="Installed $(TargetFileName) into your Mods folders." />
+  </Target>
+
+</Project>

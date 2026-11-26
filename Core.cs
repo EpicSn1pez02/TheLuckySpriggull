@@ -9,7 +9,7 @@ using MelonLoader;
 using MelonLoader.Utils;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(LuckySpriggull.Core), "The Lucky Spriggull", "2.0.0", "Epic")]
+[assembly: MelonInfo(typeof(LuckySpriggull.Core), "The Lucky Spriggull", "2.1.0", "Epic")]
 [assembly: MelonGame("Alta", "A Township Tale")]
 
 namespace LuckySpriggull
@@ -27,6 +27,7 @@ namespace LuckySpriggull
         private MelonPreferences_Entry<float> autoSpinSeconds;
         private MelonPreferences_Entry<int> maxBet;
         private MelonPreferences_Entry<string> bonuses;
+        private MelonPreferences_Entry<float> nearMissChance;
         private List<KeyValuePair<string, float>> bonusTable;   // (creature, chance 0-1)
 
         private readonly Dictionary<string, Bet> bets = new Dictionary<string, Bet>();
@@ -39,7 +40,7 @@ namespace LuckySpriggull
         private readonly Collider[] hits = new Collider[96];
         private readonly Collider[] drumHits = new Collider[32];
         private List<KeyValuePair<int, float>> table; // (multiplier, chance 0-1)
-        private Stats stats;
+        private Ledger ledger;
         private bool ready;
         private float nextCheck;
 
@@ -59,8 +60,11 @@ namespace LuckySpriggull
                 description: "Most coins one spin can take (0 = no limit). Coins over the limit wait for the next spin.");
 
             bonuses = cat.CreateEntry("Bonuses", "Schmeechee:2, Babu:2, Dais:2, Firebug:2, Turabada:2",
-                description: "Bonus rows: 'creature:percent chance'. Three in a row hands the bet back plus a boost: Schmeechee = full heal, " +
+                description: "Bonus rows: 'creature:percent chance'. Three in a row gives a boost instead of coins: Schmeechee = full heal, " +
                              "Babu = full hunger, Dais = 2x speed, Firebug = night vision, Turabada = 5x damage + damage protection. Taken from the losing spins, so the prize odds don't change.");
+            nearMissChance = cat.CreateEntry("NearMissChance", 25f,
+                description: "Percent of losing spins shown as a near miss: two Spriggulls, Phantoms, Wyrms or Goteras, and the third reel " +
+                             "creeps onto the win line then rolls back off it. Only changes what the reels show; it's still a loss. 0 = off.");
             debugButton = cat.CreateEntry("DebugButton", true,
                 description: "Log where hands are when they're near the lever's knob (for tuning).");
             MoveOldSettings();
@@ -77,7 +81,8 @@ namespace LuckySpriggull
             if (bonusTable.Count > 0)
                 LoggerInstance.Msg("Bonus rows: " + string.Join(", ", bonusTable.Select(kv => $"{kv.Key} @ {kv.Value * 100:0.#}% ({Bonus.Describe(kv.Key)})").ToArray()) + ".");
 
-            stats = new Stats(Path.Combine(MelonEnvironment.UserDataDirectory, SettingsId));
+            ledger = new Ledger(Path.Combine(MelonEnvironment.UserDataDirectory, SettingsId, "Ledger"), LoggerInstance);
+            ledger.SetOdds(table);   // so the books can tell ordinary luck from a machine paying too much or too little
         }
 
         private const string SettingsId = "LuckySpriggull";
@@ -194,6 +199,7 @@ namespace LuckySpriggull
         private void SpinPressed(SlotMachine m, int presser, float now)
         {
             uint id = m.Entity != null ? m.Entity.Identifier : 0;
+            Signal(m, SlotMachine.SignalSpin);   // every game starts its reels now; the result follows
             PickupDock betDock = BetDockOf(m);
             int inBubble = betDock != null && betDock.HasDockedPickup ? betDock.QuantityStored : 0;
             if (inBubble <= 0)
@@ -205,7 +211,7 @@ namespace LuckySpriggull
             int stake = Math.Min(inBubble, maxBet.Value > 0 ? maxBet.Value : int.MaxValue);
             betDock.DestroyAmount(stake);
             betChangedAt.Remove(m);
-            stats.Add(presser, coinsIn: stake, coinsOut: 0);
+            lastSlotCount[m] = inBubble - stake;   // these coins went into the spin, not back to the player
 
             string key = id + "/" + presser;
             if (!bets.TryGetValue(key, out Bet bet))
@@ -287,13 +293,24 @@ namespace LuckySpriggull
             if (lastSlotCount.TryGetValue(machine, out int had) && q < had) tookBackAt[machine] = now;
             EatLooseCoins(machine, now);
             q = coinIn.HasDockedPickup ? coinIn.QuantityStored : 0;
-            if (lastSlotCount.TryGetValue(machine, out int before) && before == q) return;
+            TrackCashOut(machine);
+            bool known = lastSlotCount.TryGetValue(machine, out int before);
+            if (known && before == q) return;
             lastSlotCount[machine] = q;
+            uint id = machine.Entity != null ? machine.Entity.Identifier : 0;
+            if (known && q < before)
+            {
+                ledger.TakenBack(NearestPlayer(machine, lastBettor.TryGetValue(machine, out int lb) ? lb : 0), id, before - q);
+            }
+            else if (known && q > before)
+            {
+                int who = coinIn.DockedPickup != null ? coinIn.DockedPickup.LastInteractorPlayerId : NearestPlayer(machine, 0);
+                ledger.Inserted(who, id, q - before);
+            }
             if (q <= 0) { betChangedAt.Remove(machine); return; }
             betChangedAt[machine] = now;
             if (coinIn.DockedPickup != null) lastBettor[machine] = coinIn.DockedPickup.LastInteractorPlayerId;
-            uint id = machine.Entity != null ? machine.Entity.Identifier : 0;
-            LoggerInstance.Msg($"Slot machine {id}: the bet is now {q} coin(s){(q < before ? " (some taken back out)" : "")}.");
+            LoggerInstance.Msg($"Slot machine {id}: the bet is now {q} coin(s){(known && q < before ? " (some taken back out)" : "")}.");
         }
 
         /// <summary>
@@ -366,6 +383,34 @@ namespace LuckySpriggull
         }
 
         /// <summary>Coins put into the machine wait in the coin slot (their count shows above it) until the lever is pulled.</summary>
+        private readonly Dictionary<SlotMachine, int> lastWinnings = new Dictionary<SlotMachine, int>();
+
+        /// <summary>Coins taken out of the Winnings bubble: recorded as a cash-out by the player standing at the machine.</summary>
+        private void TrackCashOut(SlotMachine machine)
+        {
+            PickupDock winnings = DocksOf(machine)[1];
+            if (winnings == null) return;
+            int w = winnings.HasDockedPickup ? winnings.QuantityStored : 0;
+            if (lastWinnings.TryGetValue(machine, out int had) && w < had)
+                ledger.CashedOut(NearestPlayer(machine, 0), machine.Entity != null ? machine.Entity.Identifier : 0, had - w);
+            lastWinnings[machine] = w;   // payouts raise it; only drops are pick-ups
+        }
+
+        /// <summary>The player whose head is closest to the machine (within 3 m), else <paramref name="fallback"/>.</summary>
+        private static int NearestPlayer(SlotMachine machine, int fallback)
+        {
+            int best = fallback;
+            float bestDist = 9f;
+            foreach (var ip in global::Player.AllPlayers)
+            {
+                PlayerController pc = (ip as global::Player)?.PlayerController;
+                if (pc == null || pc.Head == null || ip.UserInfo == null) continue;
+                float d = (pc.Head.position - machine.transform.position).sqrMagnitude;
+                if (d < bestDist) { bestDist = d; best = ip.UserInfo.Identifier; }
+            }
+            return best;
+        }
+
         private void AddToBet(SlotMachine machine, uint machineId, int player, int coins, float now)
         {
             PickupDock betDock = BetDockOf(machine);
@@ -376,6 +421,7 @@ namespace LuckySpriggull
             betChangedAt[machine] = now;   // every new coin restarts the auto-spin countdown (if it's on)
             lastBettor[machine] = player;
             lastSlotCount[machine] = before + coins;
+            ledger.Inserted(player, machineId, coins);
             LoggerInstance.Msg($"Player {player} put {coins} coin(s) into slot machine {machineId}; the bet is now {before + coins}.");
         }
 
@@ -411,21 +457,25 @@ namespace LuckySpriggull
 
                 int multiplier = Roll();
                 string bonus = multiplier <= 0 ? RollBonus() : null;
-                int kind = bonus != null ? Bonus.KindFor(bonus) : Math.Min(Math.Max(multiplier, 0), Bonus.KindBase - 1);
+                // Wins show as their multiplier (kept below the near-miss and bonus codes); some losses show as a near miss.
+                int kind = bonus != null ? Bonus.KindFor(bonus) : Math.Min(Math.Max(multiplier, 0), SlotMachine.SignalNearMiss - 1);
+                bool nearMiss = bonus == null && multiplier <= 0 && UnityEngine.Random.value * 100f < nearMissChance.Value;
+                if (nearMiss) kind = SlotMachine.SignalNearMiss + UnityEngine.Random.Range(0, 4);
                 if (bet.Machine != null)
                     results[bet.Machine] = results.TryGetValue(bet.Machine, out int best) && Rank(best) >= Rank(kind) ? best : kind;
                 if (bonus != null)
                 {
                     if (bet.Machine == null) continue;
-                    // The bet comes back, and the boost is given once the reels have stopped and the show has started.
-                    stats.Add(bet.PlayerId, coinsIn: 0, coinsOut: stake);
-                    LoggerInstance.Msg($"Player {bet.PlayerId} spun three {bonus}s on slot machine {bet.MachineId}: bet of {stake} back, plus {Bonus.Describe(bonus)}.");
-                    payQueue.Add(new Payout { Machine = bet.Machine, MachineId = bet.MachineId, PlayerId = bet.PlayerId, Amount = stake, Next = now + PayDelay, Bonus = bonus });
+                    // The bet is spent; the boost is the prize. It's given once the reels have stopped and the show has started.
+                    ledger.Spin(bet.PlayerId, bet.MachineId, stake, "Bonus: " + bonus, 0, win: false, bonus: true, jackpot: false);
+                    LoggerInstance.Msg($"Player {bet.PlayerId} spun three {bonus}s on slot machine {bet.MachineId} with {stake} coin(s): {Bonus.Describe(bonus)}. {ledger.Describe(bet.PlayerId)}");
+                    payQueue.Add(new Payout { Machine = bet.Machine, MachineId = bet.MachineId, PlayerId = bet.PlayerId, Amount = 0, Next = now + PayDelay, Bonus = bonus });
                     continue;
                 }
                 if (multiplier <= 0)
                 {
-                    LoggerInstance.Msg($"Player {bet.PlayerId} lost a {stake}-coin bet on slot machine {bet.MachineId}. {stats.Describe(bet.PlayerId)}");
+                    ledger.Spin(bet.PlayerId, bet.MachineId, stake, nearMiss ? "Loss (near miss)" : "Loss", 0, win: false, bonus: false, jackpot: false);
+                    LoggerInstance.Msg($"Player {bet.PlayerId} lost a {stake}-coin bet on slot machine {bet.MachineId}. {ledger.Describe(bet.PlayerId)}");
                     continue;
                 }
                 if (bet.Machine == null)
@@ -436,9 +486,10 @@ namespace LuckySpriggull
 
                 long won = (long)stake * multiplier;
                 int amount = (int)Math.Min(won, int.MaxValue);
-                stats.Add(bet.PlayerId, coinsIn: 0, coinsOut: amount);
-                string jackpot = multiplier == table.Max(kv => kv.Key) ? " JACKPOT!" : "";
-                LoggerInstance.Msg($"Player {bet.PlayerId} bet {stake} and won {amount} coins ({multiplier}x) on slot machine {bet.MachineId}!{jackpot} {stats.Describe(bet.PlayerId)}");
+                bool isJackpot = multiplier == table.Max(kv => kv.Key);
+                ledger.Spin(bet.PlayerId, bet.MachineId, stake, multiplier + "x", amount, win: true, bonus: false, jackpot: isJackpot);
+                string jackpot = isJackpot ? " JACKPOT!" : "";
+                LoggerInstance.Msg($"Player {bet.PlayerId} bet {stake} and won {amount} coins ({multiplier}x) on slot machine {bet.MachineId}!{jackpot} {ledger.Describe(bet.PlayerId)}");
                 payQueue.Add(new Payout { Machine = bet.Machine, MachineId = bet.MachineId, PlayerId = bet.PlayerId, Amount = amount, Next = now + PayDelay });
             }
             foreach (var r in results) Signal(r.Key, r.Value);
@@ -495,7 +546,7 @@ namespace LuckySpriggull
         }
 
         /// <summary>Which result shows when several bets on one machine finish together: any win, then a bonus, then a loss.</summary>
-        private static int Rank(int kind) => kind <= 0 ? 0 : Bonus.IsBonus(kind) ? 1 : 2 + kind;
+        private static int Rank(int kind) => kind <= 0 ? 0 : SlotMachine.IsNearMiss(kind) ? 1 : Bonus.IsBonus(kind) ? 2 : 3 + kind;
 
         /// <summary>For a losing spin: maybe a bonus row instead (chances are out of all spins, taken from the losses).</summary>
         private string RollBonus()
@@ -560,36 +611,5 @@ namespace LuckySpriggull
             return list;
         }
 
-        /// <summary>Per-player coins in / out, saved to UserData/LuckySpriggull/stats.txt as "playerId|coinsIn|coinsOut".</summary>
-        private sealed class Stats
-        {
-            private readonly string file;
-            private readonly Dictionary<int, long[]> rows = new Dictionary<int, long[]>();
-
-            public Stats(string dir)
-            {
-                Directory.CreateDirectory(dir);
-                file = Path.Combine(dir, "stats.txt");
-                if (!File.Exists(file)) return;
-                foreach (string line in File.ReadAllLines(file))
-                {
-                    string[] f = line.Split('|');
-                    if (f.Length == 3 && int.TryParse(f[0], out int id) && long.TryParse(f[1], out long a) && long.TryParse(f[2], out long b))
-                        rows[id] = new[] { a, b };
-                }
-            }
-
-            public void Add(int player, int coinsIn, int coinsOut)
-            {
-                if (!rows.TryGetValue(player, out long[] r)) rows[player] = r = new long[2];
-                r[0] += coinsIn;
-                r[1] += coinsOut;
-                try { File.WriteAllLines(file, rows.Select(kv => $"{kv.Key}|{kv.Value[0]}|{kv.Value[1]}").ToArray()); }
-                catch (IOException) { }
-            }
-
-            public string Describe(int player) =>
-                rows.TryGetValue(player, out long[] r) ? $"(lifetime: {r[0]} in, {r[1]} out)" : "";
-        }
     }
 }

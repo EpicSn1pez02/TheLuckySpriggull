@@ -56,6 +56,14 @@ namespace LuckySpriggull
         /// or <see cref="SignalNoCoins"/> when SPIN was pressed with nothing bet.
         /// </summary>
         public const int SignalNoCoins = 98;
+        /// <summary>
+        /// A losing spin shown as a near miss: kinds 80-83 mean the first two reels stop on prize symbol 0-3 (Spriggull,
+        /// Phantom, Wyrm, Gotera) and the third creeps up to it, then rolls back off it.
+        /// </summary>
+        public const int SignalNearMiss = 80;
+        public static bool IsNearMiss(int kind) => kind >= SignalNearMiss && kind < SignalNearMiss + 4;
+        /// <summary>Written the moment the lever is pulled (before the result), so every game starts its reels together.</summary>
+        public const int SignalSpin = 99;
         public static int SignalCode(int seq, int kind) => (seq % 90 + 1) * 100 + kind;
 
 
@@ -79,10 +87,21 @@ namespace LuckySpriggull
         private readonly GameObject[,][] reelIcons = new GameObject[3, 3][];   // [reel, row][symbol]: row 0 above, 1 on the win line, 2 below
         private readonly int[,] shown = new int[3, 3];             // which symbol each reel row shows
         private PickupDock signal;
-        private int signalAtPress, spinMultiplier;
+        private int spinMultiplier;
+        private int lastSignal = -1;      // the last signal code this game has seen (-1 = not read yet)
+        private int pendingKind = -1;     // the result the server sent for the current spin (-1 = not here yet)
+        private float signalsFrom;        // signals that arrive before this are old news (sent before this game loaded the machine)
         private float lastPress = -10f;
         private bool spinning;
         private float spinStart, nextTick;
+
+        // The near-miss tease on the third reel: it slows tick by tick, the matching symbol creeps onto the win line,
+        // holds there a moment, then the reel rolls back one notch and misses.
+        private static readonly float[] TeaseGaps = { 0.09f, 0.12f, 0.16f, 0.21f, 0.28f, 0.38f };   // slower and slower
+        private const float TeaseHold = 0.65f, TeaseBack = 0.3f;
+        private bool tease;
+        private int teasePrize, teaseStep;
+        private float teaseNext;
         private float[] stopAt;
         private bool[] stopped;
         private int[] finalSymbol;
@@ -91,6 +110,7 @@ namespace LuckySpriggull
         {
             Entity = GetComponent<NetworkEntity>();
             leverPivot = transform.Find("Visual/Lever Pivot");
+            signalsFrom = Time.time + 4f;   // whatever the signal dock holds as it syncs in is an old result
             handle = leverPivot != null ? leverPivot.GetComponentInChildren<Pickup>(true) : null;
             for (int r = 0; r < 3; r++)
                 for (int row = 0; row < 3; row++)
@@ -190,18 +210,18 @@ namespace LuckySpriggull
             float now = Time.time;
             CheckRanges(now);
 
-            // Every game runs the same lever check, so the server and every player's reels agree on each pull.
-            // Skipped entirely while nobody is within reach of the lever.
+            // The lever moves on every game, but only the server acts on a pull: it takes the bet and tells every game
+            // (through the signal dock) to spin, and then what the result is. Skipped while nobody is within reach.
             if (playerInReach && DetectPull(now, out int puller) && now - lastPress >= PressCooldown)
             {
                 lastPress = now;
-                StartSpin(now);
                 try { Pressed?.Invoke(this, puller); }
                 catch (Exception e) { MelonLogger.Error("[The Lucky Spriggull] Lever pull handler failed: " + e); }
             }
             if (!playerInReach) holder = null;
             AnimateLever(Time.deltaTime);
 
+            if (!ApplicationManager.IsHeadless) WatchSignal(now);
             if (spinning) AnimateReels(now);
             if (!ApplicationManager.IsHeadless)
             {
@@ -257,7 +277,7 @@ namespace LuckySpriggull
             for (Transform p = t; p != null && p != transform; p = p.parent)
             {
                 string n = p.name;
-                if (n.StartsWith("Reel Slot")) return "reel creatures";
+                if (n.StartsWith("Reel Slot")) return "reel symbols";
                 if (n == "Sign") return "sign";
                 if (n.StartsWith("Glyph ")) return "glyphs";
                 if (n.StartsWith(LabelPrefix)) return "lettering";
@@ -293,13 +313,32 @@ namespace LuckySpriggull
 
         private void StartSpin(float now)
         {
-            if (symbolCount == 0 || reelIcons[0, 1] == null || spinning) return;
+            if (symbolCount == 0 || reelIcons[0, 1] == null) return;
             spinning = true;
             spinStart = now;
-            signalAtPress = SignalCount();
+            pendingKind = -1;
+            tease = false;
             stopAt = null;
             stopped = new bool[3];
             finalSymbol = null;
+        }
+
+        /// <summary>
+        /// Every game follows the server: a new "spin" code starts the reels, and a new result code tells them where to
+        /// stop (if the "spin" code was missed, the result starts and stops them on its own). Codes already in the dock
+        /// when this game loaded the machine, or that arrive in its first few seconds, are old results and are ignored.
+        /// </summary>
+        private void WatchSignal(float now)
+        {
+            int code = SignalCount();
+            if (lastSignal < 0 || now < signalsFrom) { lastSignal = code; return; }
+            if (code == lastSignal) return;
+            lastSignal = code;
+            if (code < 100) return;   // not a result code (the dock's coins being set up)
+            int kind = code % 100;
+            if (kind == SignalSpin) { StartSpin(now); return; }
+            if (!spinning || stopAt != null) StartSpin(now);
+            pendingKind = kind;
         }
 
         /// <summary>
@@ -312,8 +351,7 @@ namespace LuckySpriggull
 
             if (stopAt == null)
             {
-                int code = SignalCount();
-                int kind = code != signalAtPress && code > 0 ? code % 100 : -1;
+                int kind = pendingKind;
                 if (kind == SignalNoCoins) { if (t >= 0.6f) Decide(now, 0); }   // nothing was bet
                 else if (kind >= 0) { if (t >= 1.0f) Decide(now, kind); }
                 else if (t >= ResultDelay + 3f) Decide(now, 0);                // never heard back: stop on a loss
@@ -325,6 +363,7 @@ namespace LuckySpriggull
                 for (int r = 0; r < 3; r++)
                 {
                     if (stopped[r]) continue;
+                    if (r == 2 && tease && (teaseStep > 0 || now >= teaseNext)) continue;   // the tease drives this reel now
                     if (stopAt != null && now >= stopAt[r])
                     {
                         stopped[r] = true;
@@ -339,12 +378,51 @@ namespace LuckySpriggull
                     Set(r, 1, shown[r, 0]);
                     Set(r, 0, UnityEngine.Random.Range(0, symbolCount));
                 }
-                if (stopped.All(s => s))
-                {
-                    spinning = false;
-                    if (spinWon) Celebrate(now);
-                }
             }
+            if (tease) AnimateTease(now);
+            if (stopped.All(s => s))
+            {
+                spinning = false;
+                if (spinWon) Celebrate(now);
+            }
+        }
+
+        /// <summary>The third reel's near miss (see <see cref="TeaseGaps"/>).</summary>
+        private void AnimateTease(float now)
+        {
+            if (stopped[2] || now < teaseNext) return;
+            int n = TeaseGaps.Length;
+            if (teaseStep < n)
+            {
+                // One slower tick down. Two ticks from the end the prize appears at the top; the last tick brings it onto
+                // the win line. Everything else that rolls past is something else, so the miss is clear.
+                Set(2, 2, shown[2, 1]);
+                Set(2, 1, shown[2, 0]);
+                Set(2, 0, teaseStep == n - 2 ? teasePrize : OtherThan(teasePrize, shown[2, 1]));
+                teaseStep++;
+                teaseNext = now + (teaseStep < n ? TeaseGaps[teaseStep] : TeaseHold);
+            }
+            else if (teaseStep == n)
+            {
+                // ...and it rolls back up one notch: the prize slips off the top, and the symbol below takes the line.
+                int below = shown[2, 2];
+                Set(2, 0, teasePrize);
+                Set(2, 1, below);
+                Set(2, 2, OtherThan(teasePrize, below));
+                finalSymbol[2] = below;
+                teaseStep++;
+                teaseNext = now + TeaseBack;
+            }
+            else stopped[2] = true;
+        }
+
+        /// <summary>A random symbol that is neither of these.</summary>
+        private int OtherThan(int a, int b)
+        {
+            if (symbolCount <= 2) return (a + 1) % Math.Max(symbolCount, 1);
+            int s;
+            do s = UnityEngine.Random.Range(0, symbolCount); while (s == a || s == b);
+            return s;
         }
 
         // ---------- topper lights: a ring of bulbs with two "comets" chasing round it; all flash on a win ----------
@@ -505,6 +583,24 @@ namespace LuckySpriggull
 
         private void Decide(float now, int multiplier)
         {
+            if (IsNearMiss(multiplier))
+            {
+                // Two of a prize symbol, and the third reel teases it.
+                int prize = SlotIcons.Names.IndexOf(SlotIcons.PrizeSymbols[multiplier - SignalNearMiss]);
+                if (prize >= 0 && symbolCount > 2)
+                {
+                    stopAt = new[] { now, now + 0.35f, float.MaxValue };
+                    finalSymbol = new[] { prize, prize, OtherThan(prize, prize) };
+                    tease = true;
+                    teasePrize = prize;
+                    teaseStep = 0;
+                    teaseNext = now + 0.45f;   // just after the second reel stops, the third starts slowing
+                    spinWon = false;
+                    spinMultiplier = 0;
+                    return;
+                }
+                multiplier = 0;
+            }
             stopAt = new[] { now, now + 0.35f, now + 0.7f };
             finalSymbol = PickResult(multiplier);
             spinWon = multiplier > 0;
@@ -994,7 +1090,7 @@ namespace LuckySpriggull
             Box(v, "Screen Frame", new Vector3(0, sy, front + 0.01f), new Vector3(0.48f, 0.34f, 0.02f), gold, false);
             Box(v, "Screen", new Vector3(0, sy, front + 0.021f), new Vector3(0.44f, 0.30f, 0.004f), black, false);
             Material bar = Mat(baseMat, "Slot Bar", new Color(0.15f, 0.35f, 0.9f), new Color(0.03f, 0.08f, 0.25f), 0.5f, 0f);
-            // The symbols: tiny creatures. Each reel row holds one copy of every symbol and shows one at a time.
+            // The symbols: the game's book drawings of each creature. Each reel row holds one copy of every symbol and shows one at a time.
             var templates = new GameObject("Reel symbol templates");
             templates.transform.SetParent(staging.transform, false);
             List<GameObject> icons = SlotIcons.Build(templates.transform, Cube(), new[] { cherry, seven, bell, bar }, log);
@@ -1008,7 +1104,7 @@ namespace LuckySpriggull
                 {
                     var slot = new GameObject($"Reel Slot {i + 1}-{row}");
                     slot.transform.SetParent(v.transform, false);
-                    slot.transform.localPosition = new Vector3(x, rowY[row], front + 0.065f);
+                    slot.transform.localPosition = new Vector3(x, rowY[row], front + 0.026f);   // the drawing sits 5 mm in front: on the strip, under the win line
                     slot.transform.localScale = Vector3.one * (row == 1 ? 1f : 0.62f);
                     int start = symbolCount > 0 ? (i * 2 + row + 3) % symbolCount : 0;
                     for (int k = 0; k < icons.Count; k++)

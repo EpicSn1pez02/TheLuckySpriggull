@@ -7,7 +7,7 @@ using UnityEngine;
 namespace LuckySpriggull
 {
     /// <summary>
-    /// Bonus rows: three of a non-prize creature hands back the bet and gives the player a boost.
+    /// Bonus rows: three of a non-prize creature gives the player a boost (the bet is spent, no coins come back).
     /// Schmeechees heal you fully, Babus fill your hunger, Dais give you a burst of speed, Firebugs give night vision.
     /// The boosts use the game's own effects (the ones food and potions apply), so they work like eating does.
     /// </summary>

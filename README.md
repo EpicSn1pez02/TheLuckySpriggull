@@ -33,7 +33,7 @@ The machine pays out about 93% of what goes in, on average.
 
 ### Bonus rows
 
-A bonus row also hands your bet back.
+A bonus row gives you a boost instead of coins (the bet is spent).
 
 | Three of | Chance | Bonus |
 |---|---|---|
@@ -62,13 +62,25 @@ Settings are on the server, in `UserData/MelonPreferences.cfg` under `[LuckySpri
 |---|---|---|
 | `Payouts` | `2x:20, 3x:6, 5x:3, 20x:1` | `multiplier:percent` for each prize. Whatever's left over is a loss. |
 | `Bonuses` | `Schmeechee:2, Babu:2, Dais:2, Firebug:2, Turabada:2` | `creature:percent` for each bonus row. |
+| `NearMissChance` | `25` | Percent of losing spins shown as a near miss: two big-prize symbols, then the third reel creeps onto the win line and rolls back off it. It's still a loss; 0 turns it off. |
 | `MaxBet` | `0` | The most coins one spin can take. 0 means no limit. |
 | `AutoSpinSeconds` | `0` | 0 means only the lever spins. Above 0, it also spins automatically this many seconds after the last coin goes in. |
 | `DebugButton` | `false` | Logs where hands are near the lever, for tuning. |
 
 **Testing a result:** set its chance to 100 (for example `Payouts = "20x:100"` or `Bonuses = "Turabada:100"`), and every spin will land on it.
 
-Per-player coins in and out are kept in `UserData/LuckySpriggull/stats.txt`.
+## Casino ledger
+
+The server keeps the books in `UserData/LuckySpriggull/Ledger/` (times are the server's local time). Every file opens in Excel or Google Sheets:
+
+| File | What's in it |
+|---|---|
+| `ledger-YYYY-MM.csv` | One row per event, as it happens: coins inserted, coins taken back, each spin (bet, result, payout), and winnings picked up. A new file starts each month. |
+| `players.csv` | Each player's running totals: spins, wins, losses, bonus rows, jackpots, total bet, total won, net, return %, biggest win, and coins inserted, taken back and cashed out. Kept across restarts. |
+| `machines.csv` | Each machine's totals: spins, coins bet, coins paid out, house profit, actual return against the expected return, and a verdict. |
+| `summary.txt` | All machines together: coins bet and paid out, the house's total win/loss, what the odds should have paid back against what was actually paid, and a verdict on whether any difference is ordinary luck or more than luck explains. Then a line per machine, and the biggest winner and loser. |
+
+If one of these files is open in Excel while people play, the server can't write to it. It logs a warning and tries again on the next spin.
 
 ## Building from source
 
@@ -90,11 +102,12 @@ dotnet build -c Release
 |---|---|
 | `SlotMachine.cs` | Builds and registers the structure. Runs the lever, reels, lights, fireworks and labels. |
 | `SlotDocks.cs` | Copies the game's docks onto the machine: the coin slot (from the market stall), the Winnings bubble (from the ATM), and a hidden "result signal" dock. The server writes each spin's result there, so every game's reels stop on the same creatures before anything is paid. |
-| `SlotIcons.cs` | Turns the creatures' models into reel symbols. |
+| `SlotIcons.cs` | The reel symbols: the game's book drawings of each creature. |
 | `SlotSign.cs` | The glowing sign. |
 | `SlotGlyphs.cs` | The game's book drawings used on the paytable and as engravings. |
 | `Bonus.cs` | The bonus-row effects. They use the game's own effects (heal, hunger, speed, damage, damage protection, glow). |
 | `Core.cs` | Settings, bets, coins, spins and payouts. |
+| `Ledger.cs` | The casino ledger: per-event log, per-player totals and the house summary. |
 | `SpawnPlacement.cs` | Puts a spawned machine on the ground, facing the player. |
 | `WinSound.cs` | Win and firework sounds. |
 

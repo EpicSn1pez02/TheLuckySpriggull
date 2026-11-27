@@ -7,32 +7,91 @@ using UnityEngine;
 namespace LuckySpriggull
 {
     /// <summary>
-    /// Bonus rows: three of a non-prize creature gives the player a boost (the bet is spent, no coins come back).
-    /// Schmeechees heal you fully, Babus fill your hunger, Dais give you a burst of speed, Firebugs give night vision.
+    /// Bonus rows: three of a non-prize creature gives the player a boost (and coins, if BonusPayout says so).
+    /// Schmeechees heal, Babus fill your hunger, Dais give speed, Glowing Mushrooms make you glow, Turabadas give damage and
+    /// damage protection. How strong and how long each is comes from the effect settings (see <see cref="Settings"/>).
     /// The boosts use the game's own effects (the ones food and potions apply), so they work like eating does.
     /// </summary>
     internal static class Bonus
     {
         /// <summary>Result kinds 90, 91, 92, 93 in the signal dock are these bonus rows.</summary>
         public const int KindBase = 90;
-        public static readonly string[] Symbols = { "Schmeechee", "Babu", "Dais", "Firebug", "Turabada" };
+        public static readonly string[] Symbols = { "Schmeechee", "Babu", "Dais", "Mushroom", "Turabada" };
+
+        /// <summary>The name players see (the setting names stay short: "Mushroom").</summary>
+        public static string Display(string symbol) => symbol == "Mushroom" ? "Glowing Mushroom" : symbol;
+
+        /// <summary>"three Glowing Mushrooms", "three Dais".</summary>
+        public static string Plural(string symbol)
+        {
+            string name = Display(symbol);
+            return name.EndsWith("s") ? name : name + "s";
+        }
+
+        /// <summary>
+        /// The bonus creature a name in the settings means. Old settings that still say "Firebug" (the glow bonus's
+        /// first name) keep working.
+        /// </summary>
+        public static string FromSetting(string name)
+        {
+            string key = (name ?? "").Replace(" ", "").Replace("_", "").Replace("-", "").ToLowerInvariant();
+            switch (key)
+            {
+                case "firebug": case "mushroom": case "glowingmushroom": case "glowmushroom": case "glowshroom": return "Mushroom";
+            }
+            return Symbols.FirstOrDefault(s => s.Equals(key, StringComparison.OrdinalIgnoreCase));
+        }
 
         public static bool IsBonus(int kind) => kind >= KindBase && kind < KindBase + Symbols.Length;
         public static string SymbolFor(int kind) => IsBonus(kind) ? Symbols[kind - KindBase] : null;
         public static int KindFor(string symbol) => KindBase + Array.IndexOf(Symbols, symbol);
 
+        /// <summary>The effect settings (server only: the server gives the effects).</summary>
+        public static class Settings
+        {
+            public static MelonPreferences_Entry<float> HealPercent, HungerPercent;
+            public static MelonPreferences_Entry<float> SpeedBoost, SpeedMinutes, GlowStrength, GlowMinutes;
+            public static MelonPreferences_Entry<float> DamageBoost, DamageProtection, DamageMinutes;
+
+            public static void Create(MelonPreferences_Category cat)
+            {
+                HealPercent = cat.CreateEntry("HealPercent", 100f,
+                    description: "Schmeechee bonus: how much health it gives back, as a percent of the player's full health (100 = fully healed).");
+                HungerPercent = cat.CreateEntry("HungerPercent", 100f,
+                    description: "Babu bonus: how much of the hunger bar it fills, as a percent of a full bar (100 = completely full).");
+                SpeedBoost = cat.CreateEntry("SpeedBoost", 2f,
+                    description: "Dais bonus: how fast the player moves, as a multiplier (2 = double speed). The game caps speed at 2x, so higher values give 2x.");
+                SpeedMinutes = cat.CreateEntry("SpeedMinutes", 5f, description: "Dais bonus: how long the speed lasts, in minutes.");
+                GlowStrength = cat.CreateEntry("GlowStrength", 1f,
+                    description: "Glowing Mushroom bonus: how bright the player glows, as a multiple of the game's own glow effect (1 = normal, 2 = twice as bright).");
+                GlowMinutes = cat.CreateEntry("GlowMinutes", 5f, description: "Glowing Mushroom bonus: how long the glow lasts, in minutes.");
+                DamageBoost = cat.CreateEntry("DamageBoost", 5f,
+                    description: "Turabada bonus: how much damage the player deals, as a multiplier (5 = five times). The game may cap it; the log says if so.");
+                DamageProtection = cat.CreateEntry("DamageProtection", 2f,
+                    description: "Turabada bonus: damage protection, as a multiplier (2 = twice the protection). 0 = no protection boost.");
+                DamageMinutes = cat.CreateEntry("DamageMinutes", 8f, description: "Turabada bonus: how long the damage and protection last, in minutes.");
+            }
+
+            public static float Get(MelonPreferences_Entry<float> e, float fallback) => e != null ? Mathf.Max(0f, e.Value) : fallback;
+        }
+
         public static string Describe(string symbol)
         {
+            float heal = Settings.Get(Settings.HealPercent, 100f), hunger = Settings.Get(Settings.HungerPercent, 100f);
             switch (symbol)
             {
-                case "Schmeechee": return "a full heal";
-                case "Babu": return "a full belly";
-                case "Dais": return "2x speed for 5 minutes";
-                case "Firebug": return "night vision for 5 minutes";
-                case "Turabada": return "5x damage and damage protection for 8 minutes";
+                case "Schmeechee": return heal >= 100f ? "a full heal" : $"{heal:0.#}% health back";
+                case "Babu": return hunger >= 100f ? "a full belly" : $"{hunger:0.#}% of a full belly";
+                case "Dais": return $"{Settings.Get(Settings.SpeedBoost, 2f):0.##}x speed for {Minutes(Settings.Get(Settings.SpeedMinutes, 5f))}";
+                case "Mushroom": return $"a glow{(Settings.Get(Settings.GlowStrength, 1f) != 1f ? $" ({Settings.Get(Settings.GlowStrength, 1f):0.##}x bright)" : "")} for {Minutes(Settings.Get(Settings.GlowMinutes, 5f))}";
+                case "Turabada":
+                    float prot = Settings.Get(Settings.DamageProtection, 2f);
+                    return $"{Settings.Get(Settings.DamageBoost, 5f):0.##}x damage{(prot > 0f ? $" and {prot:0.##}x damage protection" : "")} for {Minutes(Settings.Get(Settings.DamageMinutes, 8f))}";
                 default: return "a bonus";
             }
         }
+
+        private static string Minutes(float m) => m == 1f ? "1 minute" : $"{m:0.##} minutes";
 
         /// <summary>Logs the game's effects once, so the right names can be picked (and checked in the log).</summary>
         public static void LogEffects(MelonLogger.Instance log)
@@ -41,7 +100,7 @@ namespace LuckySpriggull
             {
                 string[] names = EffectDefinition.All.Where(e => e != null).Select(e => $"{e.name} [{e.GetType().Name}]").OrderBy(n => n).ToArray();
                 log.Msg($"Game effects ({names.Length}): " + string.Join(" | ", names));
-                log.Msg($"Bonus effects: speed = {Find("Speed")?.name ?? "none found"}, night vision = {FindNightVision()?.name ?? "none found"}.");
+                log.Msg($"Bonus effects: speed = {Find("Speed")?.name ?? "none found"}, glow = {FindNightVision()?.name ?? "none found"}.");
             }
             catch (Exception e) { log.Warning("Couldn't list the game's effects: " + e.Message); }
         }
@@ -57,44 +116,52 @@ namespace LuckySpriggull
             switch (symbol)
             {
                 case "Schmeechee":
+                {
                     if (fx.Health == null) return "no health to heal";
-                    fx.Health.Health = fx.Health.MaxHealth;
-                    return "healed to full";
+                    float add = fx.Health.MaxHealth * Settings.Get(Settings.HealPercent, 100f) / 100f;
+                    fx.Health.Health = Mathf.Min(fx.Health.MaxHealth, fx.Health.Health + add);
+                    return $"healed by {add:0.#} (now {fx.Health.Health:0.#} of {fx.Health.MaxHealth:0.#})";
+                }
 
                 case "Babu":
                     // The stat the game's "Nourish" food effect raises is the hunger bar; fill it to the top.
                     if (Find("Nourish") is StatEffect nourish && fx.StatManager != null && fx.StatManager.GetStat(nourish.StatToAffect, out var hunger))
                     {
-                        hunger.Base = hunger.Maximum;
-                        return "hunger filled";
+                        float add = hunger.Maximum * Settings.Get(Settings.HungerPercent, 100f) / 100f;
+                        hunger.Base = Mathf.Min(hunger.Maximum, hunger.Base + add);
+                        return $"hunger raised by {add:0.##} (now {hunger.Base:0.##} of {hunger.Maximum:0.##})";
                     }
                     return "couldn't find the hunger stat";
 
                 case "Dais":
-                    return Boost(fx, Find("Speed"), SpeedTimes, SpeedSeconds);
+                    return Boost(fx, Find("Speed"), Settings.Get(Settings.SpeedBoost, 2f), Settings.Get(Settings.SpeedMinutes, 5f) * 60f);
 
-                case "Firebug":
-                    return Boost(fx, FindNightVision(), 0f, VisionSeconds);   // the effect's own strength, for longer
+                case "Mushroom":
+                    // The game's own glow, scaled by GlowStrength.
+                    return Boost(fx, FindNightVision(), 0f, Settings.Get(Settings.GlowMinutes, 5f) * 60f, Settings.Get(Settings.GlowStrength, 1f));
 
                 case "Turabada":
-                    return Boost(fx, Find("Damage Indirect"), DamageTimes, DamageSeconds) + "; " +
-                           Boost(fx, Find("Damage Protection"), ProtectionTimes, DamageSeconds);
+                {
+                    float minutes = Settings.Get(Settings.DamageMinutes, 8f), prot = Settings.Get(Settings.DamageProtection, 2f);
+                    string done = Boost(fx, Find("Damage Indirect"), Settings.Get(Settings.DamageBoost, 5f), minutes * 60f);
+                    if (prot > 0f) done += "; " + Boost(fx, Find("Damage Protection"), prot, minutes * 60f);
+                    return done;
+                }
             }
             return "unknown bonus";
         }
 
-        // How strong and how long the timed boosts are.
-        private const float SpeedTimes = 2f, DamageTimes = 5f, ProtectionTimes = 2f;
-        private const float SpeedSeconds = 300f, VisionSeconds = 300f, DamageSeconds = 480f;
 
         /// <summary>
         /// A timed boost through the game's own buff system (the one cooked meat uses), but at a chosen strength and length:
         /// "times" is what the boosted stat ends up multiplied by (2 = double speed). The game turns a buff's value into a
         /// multiplier with a curve per stat, so the value is found by searching that curve; if the game caps the stat
-        /// lower, the cap is used and the log says so. times 0 = the effect's own normal strength.
+        /// lower, the cap is used and the log says so. times 0 = the effect's own normal strength, scaled by
+        /// <paramref name="scale"/>.
         /// </summary>
-        private static string Boost(PlayerEffectController fx, EffectDefinition effect, float times, float seconds)
+        private static string Boost(PlayerEffectController fx, EffectDefinition effect, float times, float seconds, float scale = 1f)
         {
+            if (seconds <= 0f) return (effect?.name ?? "effect") + ": off (0 minutes)";
             var def = effect as Alta.StatSystem.IndirectStatModifierDefinition;
             if (def == null) return "no such effect in this game";
             if (fx.StatManager == null || !fx.StatManager.GetStat(def.TargetStat, out var stat)) return def.name + ": the player has no " + def.TargetStat?.name;
@@ -103,7 +170,7 @@ namespace LuckySpriggull
             if (curve == null) return def.name + ": couldn't read its curve";
 
             AnimationCurve toMultiplier = stat.Definition.IndirectModificationCurve;
-            float value = baseValue, reached = toMultiplier != null ? toMultiplier.Evaluate(baseValue) : 0f;
+            float value = baseValue * scale, reached = toMultiplier != null ? toMultiplier.Evaluate(value) : 0f;
             string note = "";
             if (times > 0f && toMultiplier != null)
             {
@@ -125,7 +192,7 @@ namespace LuckySpriggull
             float tick = FieldOf(fx.StatManager, "tickTime") is float tt && tt > 0f ? tt : 1f;
             uint ticks = (uint)Mathf.Max(1f, seconds / tick);
             fx.StatManager.ApplyIndirectModifier(def.TargetStat, new Alta.StatSystem.IndirectModifier(scaled, ticks, curve));
-            return $"{def.name}: {(times > 0f ? reached.ToString("0.##") + "x" : "normal strength")}{note} for {seconds:0} s";
+            return $"{def.name}: {(times > 0f ? reached.ToString("0.##") + "x" : scale == 1f ? "normal strength" : $"{scale:0.##}x its normal strength")}{note} for {seconds:0} s";
         }
 
         private static object FieldOf(object target, string name)

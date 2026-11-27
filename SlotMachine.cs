@@ -185,7 +185,7 @@ namespace LuckySpriggull
                 viewerClose = d <= LightRange;
                 if (frontGlow != null && frontGlow.enabled != viewerClose) frontGlow.enabled = viewerClose;
                 if (signGlow != null && signGlow.enabled != viewerClose) signGlow.enabled = viewerClose;
-                if (viewerNear) ShowBet();
+                if (viewerNear) { ShowBet(); ShowPaytable(); }
             }
         }
 
@@ -280,7 +280,7 @@ namespace LuckySpriggull
                 if (n.StartsWith("Reel Slot")) return "reel symbols";
                 if (n == "Sign") return "sign";
                 if (n.StartsWith("Glyph ")) return "glyphs";
-                if (n.StartsWith(LabelPrefix)) return "lettering";
+                if (n.StartsWith(LabelPrefix) || n.StartsWith(AmountName)) return "lettering";
                 if (n.StartsWith("Bulb ")) return "bulbs";
                 if (n.EndsWith(SlotDocks.InName) || n.EndsWith(SlotDocks.OutName) || n.EndsWith(SlotDocks.BetName) || n.EndsWith(SlotDocks.SignalName)) return "coin bubbles";
             }
@@ -330,6 +330,7 @@ namespace LuckySpriggull
         /// </summary>
         private void WatchSignal(float now)
         {
+            if (versionMismatch) return;   // this game can't read this server's results (see ShowPaytable)
             int code = SignalCount();
             if (lastSignal < 0 || now < signalsFrom) { lastSignal = code; return; }
             if (code == lastSignal) return;
@@ -488,9 +489,10 @@ namespace LuckySpriggull
         {
             celebrateUntil = now + 3f;
             if (ApplicationManager.IsHeadless) return;
-            glowRow = PaytableRows.FindIndex(r => r.Value == spinMultiplier);   // which paytable row this prize is
+            bool prize = spinMultiplier >= 1 && spinMultiplier <= 4;
+            glowRow = prize ? spinMultiplier - 1 : -1;   // a win's result is its paytable row
             WinSound.Play(this);
-            int rockets = Bonus.IsBonus(spinMultiplier) ? 4 : spinMultiplier >= 20 ? 8 : spinMultiplier >= 5 ? 5 : 3;   // bigger prize, bigger show
+            int rockets = !prize ? 4 : spinMultiplier == 1 ? 8 : spinMultiplier == 2 ? 5 : 3;   // bigger prize, bigger show
             for (int i = 0; i < rockets; i++)
             {
                 Vector3 from = new Vector3(UnityEngine.Random.Range(-0.22f, 0.22f), Lift + CabTop + TopperH + 0.03f, -0.02f);   // from the top of the topper
@@ -616,10 +618,10 @@ namespace LuckySpriggull
                 int b = SlotIcons.Names.IndexOf(Bonus.SymbolFor(multiplier));
                 if (b >= 0) return new[] { b, b, b };
             }
-            else if (multiplier > 0)
+            else if (multiplier >= 1 && multiplier <= 4)
             {
-                int s = SlotIcons.ForMultiplier(multiplier);
-                return new[] { s, s, s };
+                int s = SlotIcons.Names.IndexOf(SlotIcons.PrizeSymbols[multiplier - 1]);   // prize row 1 = Spriggull ... 4 = Gotera
+                if (s >= 0) return new[] { s, s, s };
             }
             var r = new[] { UnityEngine.Random.Range(0, n), UnityEngine.Random.Range(0, n), UnityEngine.Random.Range(0, n) };
             if (r[0] == r[1] && r[1] == r[2]) r[2] = (r[2] + 1) % n;   // never show three of a kind on a loss
@@ -849,10 +851,16 @@ namespace LuckySpriggull
                 Label(root, donor, "US1  US2  AUS  EU", new Vector3(0f, y, D / 2f + 0.12f), under, scale * 0.17f, letters, letterMaterial, ink);
             }
             Label(root, donor, "INSERT COINS", new Vector3(0f, Lift + ShelfTop + 0.016f, ShelfZ + 0.064f), Quaternion.Euler(-35f, 0f, 0f) * facing, scale * 0.17f, letters, letterMaterial, new Color(0.08f, 0.05f, 0.03f));
-            // The paytable's amounts, at the right of each row of three creatures.
+            // The paytable's amounts, at the right of each row of three creatures. Named by row, so the server's payouts
+            // can be written into them later (see ShowPaytable).
             for (int i = 0; i < PaytableRows.Count; i++)
+            {
+                string amount = PaytableRows[i].Value > 0 ? PaytableRows[i].Value + "X" : "-";
                 // The game's text sits a little above its anchor, so it's lowered to line up with the middle of its row.
-                Label(root, donor, PaytableRows[i].Value + "X", new Vector3(PayTextX, Lift + PayRowY(i) - 0.008f, front + PayFace + 0.004f), facing, scale * 0.3f, letters, letterMaterial, Color.black);
+                Label(root, donor, amount, new Vector3(PayTextX, Lift + PayRowY(i) - 0.008f, front + PayFace + 0.004f), facing, scale * 0.3f, letters, letterMaterial, Color.black);
+                Transform made = root.transform.Find(LabelPrefix + amount);
+                if (made != null) made.name = AmountName + i;
+            }
             log.Msg($"Labels: the bet counter and {PaytableRows.Count} paytable amounts in the game's lettering.");
         }
 
@@ -936,15 +944,22 @@ namespace LuckySpriggull
         private void RefreshLabels()
         {
             foreach (TextRenderer tr in GetComponentsInChildren<TextRenderer>(true))
-                if (tr.gameObject.name.StartsWith(LabelPrefix))
+            {
+                string n = tr.gameObject.name;
+                string text = n.StartsWith(LabelPrefix) ? n.Substring(LabelPrefix.Length)
+                            : n.StartsWith(AmountName) && int.TryParse(n.Substring(AmountName.Length), out int row) && row < PaytableRows.Count
+                                ? (PaytableRows[row].Value > 0 ? PaytableRows[row].Value + "X" : "")
+                            : null;
+                if (text == null) continue;
                     try
                     {
                         tr.gameObject.SetActive(true);
                         tr.SetVisibility(true);
-                        tr.Text = tr.gameObject.name.Substring(LabelPrefix.Length);
+                        tr.Text = text;
                         tr.Refresh(isForced: true);
                     }
                     catch (Exception e) { MelonLogger.Warning("[The Lucky Spriggull] A label couldn't draw: " + e.Message); }
+            }
         }
 
         // ---------- the paytable ----------
@@ -966,11 +981,90 @@ namespace LuckySpriggull
             return PayBottom + PayHeight - margin - (i + 0.5f) * rowH;
         }
 
-        /// <summary>Uses the machine's own payout settings, so the paytable always matches the real odds (biggest four prizes).</summary>
+        /// <summary>
+        /// The four prize rows, biggest first: Spriggull, Phantom, Wyrm, Gotera, with this game's payout settings as a
+        /// starting point. The server's own payouts replace the amounts on every game as soon as they sync in.
+        /// </summary>
         public static void SetPayouts(IEnumerable<int> multipliers)
         {
-            PaytableRows = multipliers.Distinct().OrderByDescending(m => m).Take(4)
-                .Select(m => new KeyValuePair<string, int>(SlotIcons.PrizeFor(m), m)).ToList();
+            List<int> m = multipliers.OrderByDescending(x => x).Take(4).ToList();
+            PaytableRows = SlotIcons.PrizeSymbols.Select((name, i) => new KeyValuePair<string, int>(name, i < m.Count ? m[i] : 0)).ToList();
+        }
+
+        /// <summary>
+        /// Which version of the server-to-game messages (result codes, paytable) this build speaks. Raise it whenever
+        /// they change, so a game and server that don't match say so instead of showing the wrong thing. (1-12.)
+        /// </summary>
+        public const int Protocol = 1;
+
+        /// <summary>
+        /// One row of the server's paytable, as a coin count for the hidden paytable dock. The game only syncs a dock's
+        /// count up to 123,456, so the paytable goes out one row at a time, round and round:
+        /// protocol x 10,000 + row x 100 + multiplier (row 0 = the top prize; multiplier 0 = no such prize).
+        /// </summary>
+        public static int EncodePaytableRow(int row, int multiplier) =>
+            Protocol * 10000 + Mathf.Clamp(row, 0, 3) * 100 + Mathf.Clamp(multiplier, 0, 99);
+
+        private const string AmountName = "Paytable Amount ";
+        private PickupDock paytableDock;
+        private int paytableShown = -1;
+        private bool versionMismatch;
+        private static bool mismatchLogged;
+
+        /// <summary>
+        /// Writes each paytable row the server sends into the machine's amounts. If the server speaks a different
+        /// version of the mod (or an old one that sends no paytable at all), the paytable says so and the reels stay
+        /// still: this game can't read that server's results correctly.
+        /// </summary>
+        private void ShowPaytable()
+        {
+            if (paytableDock == null) SlotDocks.Find(this, out _, out _, out _, out paytableDock);
+            if (paytableDock == null) return;
+            int code = paytableDock.HasDockedPickup ? paytableDock.QuantityStored : 0;
+            if (code == paytableShown) return;
+            int version = code / 10000;
+            if (version == 0)
+            {
+                // Nothing yet. Give the server a few seconds to sync before deciding it's an old version.
+                if (Time.time < signalsFrom + 6f) return;
+                paytableShown = code;
+                ShowMismatch("the server's copy of the mod is older than this one");
+                return;
+            }
+            paytableShown = code;
+            if (version != Protocol)
+            {
+                ShowMismatch(version > Protocol ? "this game's copy of the mod is older than the server's" : "the server's copy of the mod is older than this one");
+                return;
+            }
+            if (versionMismatch)
+            {
+                versionMismatch = false;
+                for (int k = 0; k < 4; k++) SetAmount(k, "");   // clear the warning; the rows fill in as they arrive
+            }
+            int row = (code % 10000) / 100, multiplier = code % 100;
+            if (row < 4) SetAmount(row, multiplier > 0 ? multiplier + "X" : "");
+        }
+
+        private void ShowMismatch(string why)
+        {
+            versionMismatch = true;
+            spinning = false;
+            string[] words = { "UPDATE", "YOUR", "MOD", "" };
+            for (int i = 0; i < 4; i++) SetAmount(i, words[i]);
+            if (!mismatchLogged)
+            {
+                mismatchLogged = true;
+                MelonLogger.Warning($"[The Lucky Spriggull] This slot machine can't be shown correctly: {why}. Everyone (server and players) needs the same version of TheLuckySpriggull.dll.");
+            }
+        }
+
+        private void SetAmount(int row, string text)
+        {
+            TextRenderer tr = transform.Find(AmountName + row)?.GetComponent<TextRenderer>();
+            if (tr == null) return;
+            try { tr.Text = text; tr.Refresh(isForced: true); }
+            catch (Exception e) { MelonLogger.Warning("[The Lucky Spriggull] Couldn't update the paytable: " + e.Message); }
         }
 
         private static void SetField(object target, string field, object value)

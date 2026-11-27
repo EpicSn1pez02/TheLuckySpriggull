@@ -33,14 +33,14 @@ The machine pays out about 93% of what goes in, on average.
 
 ### Bonus rows
 
-A bonus row gives you a boost instead of coins (the bet is spent).
+By default a bonus row gives you a boost instead of coins (the bet is spent). Server owners can also pay coins on bonus rows, change each boost's strength and length, or turn the boosts off (see Settings).
 
-| Three of | Chance | Bonus |
+| Three of | Chance | Bonus (default settings) |
 |---|---|---|
 | Schmeechee | 2% | Full heal |
 | Babu | 2% | Full hunger |
 | Dais | 2% | 2× speed for 5 minutes |
-| Firebug | 2% | Glow in the dark for 5 minutes |
+| Glowing Mushroom | 2% | Glow in the dark for 5 minutes |
 | Turabada | 2% | 5× damage and damage protection for 8 minutes |
 
 Bonus chances come out of the losing spins, so they don't change the prize odds.
@@ -60,12 +60,21 @@ Settings are on the server, in `UserData/MelonPreferences.cfg` under `[LuckySpri
 
 | Key | Default | Meaning |
 |---|---|---|
-| `Payouts` | `2x:20, 3x:6, 5x:3, 20x:1` | `multiplier:percent` for each prize. Whatever's left over is a loss. |
-| `Bonuses` | `Schmeechee:2, Babu:2, Dais:2, Firebug:2, Turabada:2` | `creature:percent` for each bonus row. |
+| `Payouts` | `2x:20, 3x:6, 5x:3, 20x:1` | The four prizes: `multiplier:percent` (multipliers 1-99). The biggest is three Spriggulls, then Phantoms, Wyrms and Goteras. Whatever's left over is a loss. Every player's machine shows the server's amounts on its paytable. |
+| `Bonuses` | `Schmeechee:2, Babu:2, Dais:2, Mushroom:2, Turabada:2` | `creature:percent` for each bonus row (`Mushroom` is the Glowing Mushroom). Add `:Nx` to pay that creature N × the bet, for example `Babu:2:1x`. |
+| `BonusPayout` | `0` | Coins every bonus row pays, as a multiple of the bet: 0 = none, 1 = the bet back, 2 = double. A creature's own `:Nx` overrides it. |
+| `BonusEffects` | `true` | `false` turns the boosts off, so bonus rows only pay `BonusPayout`. For "money back only", use `BonusEffects = false` with `BonusPayout = 1`. |
+| `HealPercent` | `100` | Schmeechee: health given back, as a percent of full health. |
+| `HungerPercent` | `100` | Babu: how much of the hunger bar it fills, as a percent. |
+| `SpeedBoost` / `SpeedMinutes` | `2` / `5` | Dais: the speed multiplier (the game caps speed at 2×), and how long it lasts. |
+| `GlowStrength` / `GlowMinutes` | `1` / `5` | Glowing Mushroom: how bright the glow is (1 = the game's normal glow), and how long it lasts. |
+| `DamageBoost` / `DamageProtection` / `DamageMinutes` | `5` / `2` / `8` | Turabada: the damage multiplier, the damage-protection multiplier (0 = none), and how long both last. |
 | `NearMissChance` | `25` | Percent of losing spins shown as a near miss: two big-prize symbols, then the third reel creeps onto the win line and rolls back off it. It's still a loss; 0 turns it off. |
 | `MaxBet` | `0` | The most coins one spin can take. 0 means no limit. |
 | `AutoSpinSeconds` | `0` | 0 means only the lever spins. Above 0, it also spins automatically this many seconds after the last coin goes in. |
 | `DebugButton` | `false` | Logs where hands are near the lever, for tuning. |
+
+The game may cap how high a stat like speed or damage can go. If it does, the server log says what the player actually got.
 
 **Testing a result:** set its chance to 100 (for example `Payouts = "20x:100"` or `Bonuses = "Turabada:100"`), and every spin will land on it.
 
@@ -101,7 +110,7 @@ dotnet build -c Release
 | File | What it does |
 |---|---|
 | `SlotMachine.cs` | Builds and registers the structure. Runs the lever, reels, lights, fireworks and labels. |
-| `SlotDocks.cs` | Copies the game's docks onto the machine: the coin slot (from the market stall), the Winnings bubble (from the ATM), and a hidden "result signal" dock. The server writes each spin's result there, so every game's reels stop on the same creatures before anything is paid. |
+| `SlotDocks.cs` | Copies the game's docks onto the machine: the coin slot (from the market stall), the Winnings bubble (from the ATM), and two hidden docks. The server writes each spin's result into one, so every game's reels stop on the same creatures before anything is paid. It writes its paytable into the other, so every machine shows the server's payouts. |
 | `SlotIcons.cs` | The reel symbols: the game's book drawings of each creature. |
 | `SlotSign.cs` | The glowing sign. |
 | `SlotGlyphs.cs` | The game's book drawings used on the paytable and as engravings. |

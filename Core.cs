@@ -9,7 +9,7 @@ using MelonLoader;
 using MelonLoader.Utils;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(LuckySpriggull.Core), "The Lucky Spriggull", "2.1.0", "Epic")]
+[assembly: MelonInfo(typeof(LuckySpriggull.Core), "The Lucky Spriggull", "2.2.0", "Epic")]
 [assembly: MelonGame("Alta", "A Township Tale")]
 
 namespace LuckySpriggull
@@ -28,6 +28,9 @@ namespace LuckySpriggull
         private MelonPreferences_Entry<int> maxBet;
         private MelonPreferences_Entry<string> bonuses;
         private MelonPreferences_Entry<float> nearMissChance;
+        private MelonPreferences_Entry<int> bonusPayout;
+        private MelonPreferences_Entry<bool> bonusEffects;
+        private readonly Dictionary<string, int> bonusPays = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private List<KeyValuePair<string, float>> bonusTable;   // (creature, chance 0-1)
 
         private readonly Dictionary<string, Bet> bets = new Dictionary<string, Bet>();
@@ -53,15 +56,24 @@ namespace LuckySpriggull
         {
             var cat = MelonPreferences.CreateCategory(SettingsId, "The Lucky Spriggull");
             payouts = cat.CreateEntry("Payouts", "2x:20, 3x:6, 5x:3, 20x:1",
-                description: "What a bet can win: 'multiplier:percent chance'. Whatever is left over is a loss. Default pays back ~93% on average.");
+                description: "The four prizes: 'multiplier:percent chance' (multipliers 1-99). The biggest is three Spriggulls, then Phantoms, " +
+                             "Wyrms and Goteras. Whatever is left over is a loss. The machines' paytables show these amounts on every player's game. " +
+                             "Default pays back ~93% on average.");
             autoSpinSeconds = cat.CreateEntry("AutoSpinSeconds", 0f,
                 description: "0 = only the lever spins. Above 0: also spin the bet automatically this many seconds after the last coin went in.");
             maxBet = cat.CreateEntry("MaxBet", 0,
                 description: "Most coins one spin can take (0 = no limit). Coins over the limit wait for the next spin.");
 
-            bonuses = cat.CreateEntry("Bonuses", "Schmeechee:2, Babu:2, Dais:2, Firebug:2, Turabada:2",
-                description: "Bonus rows: 'creature:percent chance'. Three in a row gives a boost instead of coins: Schmeechee = full heal, " +
-                             "Babu = full hunger, Dais = 2x speed, Firebug = night vision, Turabada = 5x damage + damage protection. Taken from the losing spins, so the prize odds don't change.");
+            bonuses = cat.CreateEntry("Bonuses", "Schmeechee:2, Babu:2, Dais:2, Mushroom:2, Turabada:2",
+                description: "Bonus rows: 'creature:percent chance', optionally ':Nx' to pay that creature N x the bet (e.g. 'Babu:2:1x'). " +
+                             "Schmeechee = heal, Babu = hunger, Dais = speed, Mushroom (the Glowing Mushroom) = glow, Turabada = damage + damage protection (see the effect settings). " +
+                             "Taken from the losing spins, so the prize odds don't change.");
+            bonusPayout = cat.CreateEntry("BonusPayout", 0,
+                description: "Coins a bonus row pays, as a multiple of the bet: 0 = none (the effect is the prize), 1 = the bet back, 2 = double... " +
+                             "A creature's own ':Nx' in Bonuses overrides this.");
+            bonusEffects = cat.CreateEntry("BonusEffects", true,
+                description: "true = bonus rows give their effect (heal, hunger, speed, glow, damage). false = no effects: bonus rows only pay BonusPayout.");
+            Bonus.Settings.Create(cat);
             nearMissChance = cat.CreateEntry("NearMissChance", 25f,
                 description: "Percent of losing spins shown as a near miss: two Spriggulls, Phantoms, Wyrms or Goteras, and the third reel " +
                              "creeps onto the win line then rolls back off it. Only changes what the reels show; it's still a loss. 0 = off.");
@@ -69,7 +81,8 @@ namespace LuckySpriggull
                 description: "Log where hands are when they're near the lever's knob (for tuning).");
             MoveOldSettings();
 
-            table = ParsePayouts(payouts.Value);
+            table = ParsePayouts(payouts.Value).OrderByDescending(kv => kv.Key).ToList();
+            if (table.Count > 4) { LoggerInstance.Warning("Payouts: only four prizes fit the machine (Spriggull, Phantom, Wyrm, Gotera); the smallest extras are ignored."); table = table.Take(4).ToList(); }
             float rtp = table.Sum(kv => kv.Key * kv.Value);
             float win = table.Sum(kv => kv.Value);
             LoggerInstance.Msg($"Payouts: {string.Join(", ", table.Select(kv => $"{kv.Key}x @ {kv.Value * 100:0.#}%").ToArray())}. " +
@@ -79,10 +92,18 @@ namespace LuckySpriggull
             if (bonusSpec.IndexOf("Turabada", StringComparison.OrdinalIgnoreCase) < 0) bonusSpec += ", Turabada:2";
             bonusTable = ParseBonuses(bonusSpec, 1f - win);
             if (bonusTable.Count > 0)
-                LoggerInstance.Msg("Bonus rows: " + string.Join(", ", bonusTable.Select(kv => $"{kv.Key} @ {kv.Value * 100:0.#}% ({Bonus.Describe(kv.Key)})").ToArray()) + ".");
+                LoggerInstance.Msg("Bonus rows: " + string.Join(", ", bonusTable.Select(kv =>
+                    $"{Bonus.Display(kv.Key)} @ {kv.Value * 100:0.#}% ({DescribeBonus(kv.Key)})").ToArray()) + ".");
+            if (!bonusEffects.Value && bonusTable.Any(kv => BonusPaysFor(kv.Key) == 0))
+                LoggerInstance.Warning("BonusEffects is off and some bonus rows pay no coins: those rows give nothing at all. Set BonusPayout (or a ':Nx') to pay them.");
+            float bonusReturn = bonusTable.Sum(kv => BonusPaysFor(kv.Key) * kv.Value);
+            if (bonusReturn > 0f)
+                LoggerInstance.Msg($"With bonus-row coins, the average return is {(rtp + bonusReturn) * 100:0.#}% of each bet.");
 
             ledger = new Ledger(Path.Combine(MelonEnvironment.UserDataDirectory, SettingsId, "Ledger"), LoggerInstance);
-            ledger.SetOdds(table);   // so the books can tell ordinary luck from a machine paying too much or too little
+            // So the books can tell ordinary luck from a machine paying too much or too little (bonus-row coins count too).
+            ledger.SetOdds(table.Concat(bonusTable.Where(kv => BonusPaysFor(kv.Key) > 0)
+                                .Select(kv => new KeyValuePair<int, float>(BonusPaysFor(kv.Key), kv.Value))));
         }
 
         private const string SettingsId = "LuckySpriggull";
@@ -170,6 +191,7 @@ namespace LuckySpriggull
                     LogNearbyHands(m, now);
                     AutoSpin(m, now);
                     if (check) EatCoins(m, now);
+                    SendPaytable(m, now);
                 }
                 ResolveBets(now);
                 PayOut(now);
@@ -383,6 +405,26 @@ namespace LuckySpriggull
         }
 
         /// <summary>Coins put into the machine wait in the coin slot (their count shows above it) until the lever is pulled.</summary>
+        private readonly Dictionary<SlotMachine, KeyValuePair<int, float>> paytableNext = new Dictionary<SlotMachine, KeyValuePair<int, float>>();
+        private readonly HashSet<SlotMachine> paytableWarned = new HashSet<SlotMachine>();
+
+        /// <summary>
+        /// Every game shows this server's payouts: the paytable goes out through the machine's hidden paytable dock one
+        /// row at a time, round and round (a dock's count only syncs up to 123,456, too small for all four at once).
+        /// </summary>
+        private void SendPaytable(SlotMachine machine, float now)
+        {
+            int row = 0;
+            if (paytableNext.TryGetValue(machine, out var next)) { if (now < next.Value) return; row = next.Key; }
+            paytableNext[machine] = new KeyValuePair<int, float>((row + 1) % 4, now + 0.75f);
+            SlotDocks.Find(machine, out _, out _, out _, out PickupDock dock);
+            if (dock == null) return;
+            int multiplier = row < table.Count ? table[row].Key : 0;
+            string why = SlotDocks.SetCount(dock, SlotMachine.EncodePaytableRow(row, multiplier));
+            if (why != null && paytableWarned.Add(machine))
+                LoggerInstance.Warning($"Couldn't send the paytable to slot machine {(machine.Entity != null ? machine.Entity.Identifier : 0)} ({why}).");
+        }
+
         private readonly Dictionary<SlotMachine, int> lastWinnings = new Dictionary<SlotMachine, int>();
 
         /// <summary>Coins taken out of the Winnings bubble: recorded as a cash-out by the player standing at the machine.</summary>
@@ -455,10 +497,11 @@ namespace LuckySpriggull
                 bet.SpinAt = float.MaxValue;   // any coins over MaxBet wait for the next press
                 if (bet.Coins <= 0) bets.Remove(key);
 
-                int multiplier = Roll();
-                string bonus = multiplier <= 0 ? RollBonus() : null;
-                // Wins show as their multiplier (kept below the near-miss and bonus codes); some losses show as a near miss.
-                int kind = bonus != null ? Bonus.KindFor(bonus) : Math.Min(Math.Max(multiplier, 0), SlotMachine.SignalNearMiss - 1);
+                int row = Roll();
+                int multiplier = row >= 0 ? table[row].Key : 0;
+                string bonus = row < 0 ? RollBonus() : null;
+                // A win shows as its paytable row (1 = the top prize), a bonus as its creature; some losses show as a near miss.
+                int kind = bonus != null ? Bonus.KindFor(bonus) : row >= 0 ? row + 1 : 0;
                 bool nearMiss = bonus == null && multiplier <= 0 && UnityEngine.Random.value * 100f < nearMissChance.Value;
                 if (nearMiss) kind = SlotMachine.SignalNearMiss + UnityEngine.Random.Range(0, 4);
                 if (bet.Machine != null)
@@ -466,10 +509,12 @@ namespace LuckySpriggull
                 if (bonus != null)
                 {
                     if (bet.Machine == null) continue;
-                    // The bet is spent; the boost is the prize. It's given once the reels have stopped and the show has started.
-                    ledger.Spin(bet.PlayerId, bet.MachineId, stake, "Bonus: " + bonus, 0, win: false, bonus: true, jackpot: false);
-                    LoggerInstance.Msg($"Player {bet.PlayerId} spun three {bonus}s on slot machine {bet.MachineId} with {stake} coin(s): {Bonus.Describe(bonus)}. {ledger.Describe(bet.PlayerId)}");
-                    payQueue.Add(new Payout { Machine = bet.Machine, MachineId = bet.MachineId, PlayerId = bet.PlayerId, Amount = 0, Next = now + PayDelay, Bonus = bonus });
+                    // The bonus coins (if any) and the effect (if on) come once the reels have stopped and the show has started.
+                    int bonusCoins = (int)Math.Min((long)stake * BonusPaysFor(bonus), int.MaxValue);
+                    ledger.Spin(bet.PlayerId, bet.MachineId, stake, "Bonus: " + Bonus.Display(bonus), bonusCoins, win: false, bonus: true, jackpot: false);
+                    LoggerInstance.Msg($"Player {bet.PlayerId} spun three {Bonus.Plural(bonus)} on slot machine {bet.MachineId} with {stake} coin(s): {DescribeBonus(bonus)}. {ledger.Describe(bet.PlayerId)}");
+                    payQueue.Add(new Payout { Machine = bet.Machine, MachineId = bet.MachineId, PlayerId = bet.PlayerId, Amount = bonusCoins, Next = now + PayDelay,
+                                              Bonus = bonusEffects.Value ? bonus : null });
                     continue;
                 }
                 if (multiplier <= 0)
@@ -486,7 +531,7 @@ namespace LuckySpriggull
 
                 long won = (long)stake * multiplier;
                 int amount = (int)Math.Min(won, int.MaxValue);
-                bool isJackpot = multiplier == table.Max(kv => kv.Key);
+                bool isJackpot = row == 0;
                 ledger.Spin(bet.PlayerId, bet.MachineId, stake, multiplier + "x", amount, win: true, bonus: false, jackpot: isJackpot);
                 string jackpot = isJackpot ? " JACKPOT!" : "";
                 LoggerInstance.Msg($"Player {bet.PlayerId} bet {stake} and won {amount} coins ({multiplier}x) on slot machine {bet.MachineId}!{jackpot} {ledger.Describe(bet.PlayerId)}");
@@ -515,7 +560,7 @@ namespace LuckySpriggull
                 {
                     string how;
                     try { how = Bonus.Apply(p.PlayerId, p.Bonus); } catch (Exception e) { how = "failed: " + e.Message; }
-                    LoggerInstance.Msg($"Bonus for player {p.PlayerId} ({p.Bonus}s): {how}.");
+                    LoggerInstance.Msg($"Bonus for player {p.PlayerId} (three {Bonus.Plural(p.Bonus)}): {how}.");
                     p.Bonus = null;   // once, even if paying the coins back has to be retried
                 }
                 PickupDock winnings = DocksOf(p.Machine)[1];
@@ -546,7 +591,7 @@ namespace LuckySpriggull
         }
 
         /// <summary>Which result shows when several bets on one machine finish together: any win, then a bonus, then a loss.</summary>
-        private static int Rank(int kind) => kind <= 0 ? 0 : SlotMachine.IsNearMiss(kind) ? 1 : Bonus.IsBonus(kind) ? 2 : 3 + kind;
+        private static int Rank(int kind) => kind <= 0 ? 0 : SlotMachine.IsNearMiss(kind) ? 1 : Bonus.IsBonus(kind) ? 2 : 10 - kind;   // prize row 1 ranks highest
 
         /// <summary>For a losing spin: maybe a bonus row instead (chances are out of all spins, taken from the losses).</summary>
         private string RollBonus()
@@ -569,8 +614,13 @@ namespace LuckySpriggull
             foreach (string part in (spec ?? "").Split(','))
             {
                 string[] kv = part.Split(':');
-                if (kv.Length != 2) continue;
-                string name = Bonus.Symbols.FirstOrDefault(s => s.Equals(kv[0].Trim(), StringComparison.OrdinalIgnoreCase));
+                if (kv.Length != 2 && kv.Length != 3) continue;
+                string name = Bonus.FromSetting(kv[0].Trim());
+                if (name != null && kv.Length == 3)
+                {
+                    if (int.TryParse(kv[2].Trim().TrimEnd('x', 'X'), out int pays) && pays >= 0) bonusPays[name] = pays;
+                    else LoggerInstance.Warning($"Bonus '{part.Trim()}': the payout should look like '1x'.");
+                }
                 if (name == null) { LoggerInstance.Warning($"Unknown bonus creature '{kv[0].Trim()}' (use {string.Join(", ", Bonus.Symbols)})."); continue; }
                 if (!float.TryParse(kv[1].Trim().TrimEnd('%'), NumberStyles.Float, CultureInfo.InvariantCulture, out float pct) || pct <= 0) continue;
                 float chance = Mathf.Min(pct / 100f, room - total);
@@ -581,15 +631,26 @@ namespace LuckySpriggull
             return list;
         }
 
+        /// <summary>Which prize this spin wins: its row (0 = the top prize), or -1 for none.</summary>
         private int Roll()
         {
             float r = UnityEngine.Random.value;
-            foreach (var kv in table)
+            for (int i = 0; i < table.Count; i++)
             {
-                if (r < kv.Value) return kv.Key;
-                r -= kv.Value;
+                if (r < table[i].Value) return i;
+                r -= table[i].Value;
             }
-            return 0;
+            return -1;
+        }
+
+        private int BonusPaysFor(string creature) => bonusPays.TryGetValue(creature, out int n) ? n : Math.Max(0, bonusPayout.Value);
+
+        private string DescribeBonus(string creature)
+        {
+            int pays = BonusPaysFor(creature);
+            string coins = pays == 0 ? "" : pays == 1 ? "the bet back" : $"{pays}x the bet";
+            string effect = bonusEffects.Value ? Bonus.Describe(creature) : "";
+            return coins.Length > 0 && effect.Length > 0 ? coins + " + " + effect : coins.Length > 0 ? coins : effect.Length > 0 ? effect : "nothing (effects off, no payout)";
         }
 
         /// <summary>"2x:20, 3x:6" -> [(2, 0.20), (3, 0.06)]. Bad entries are skipped; chances are capped at 100% total.</summary>
@@ -602,6 +663,7 @@ namespace LuckySpriggull
                 string[] kv = part.Split(':');
                 if (kv.Length != 2) continue;
                 if (!int.TryParse(kv[0].Trim().TrimEnd('x', 'X'), out int mult) || mult <= 0) { LoggerInstance.Warning($"Bad payout '{part.Trim()}'"); continue; }
+                if (mult > 99) { LoggerInstance.Warning($"Payout '{part.Trim()}': the most a prize can pay is 99x; using 99x."); mult = 99; }
                 if (!float.TryParse(kv[1].Trim().TrimEnd('%'), NumberStyles.Float, CultureInfo.InvariantCulture, out float pct) || pct <= 0) { LoggerInstance.Warning($"Bad payout '{part.Trim()}'"); continue; }
                 float chance = Mathf.Min(pct / 100f, 1f - total);
                 if (chance <= 0) { LoggerInstance.Warning("Payout chances add up to more than 100%; extra entries ignored."); break; }

@@ -27,8 +27,8 @@ namespace LuckySpriggull
             new KeyValuePair<string, string>("Turabada", "Glyph_Turabada"),
             new KeyValuePair<string, string>("Babu", "Glyph_Babu"),
             new KeyValuePair<string, string>("Dais", "Glyph_Dais"),
-            new KeyValuePair<string, string>("Schmeechee", "Glyph_Schmeechee-Poisonous"),   // the red one
-            new KeyValuePair<string, string>("Firebug", "Glyph_Glowing_Mushroom"),          // the book has no Firebug; it gives the glow bonus
+            new KeyValuePair<string, string>("Schmeechee", "Glyph_HealthIcon"),            // the heal bonus: the game's health heart
+            new KeyValuePair<string, string>("Mushroom", "Glyph_Glowing_Mushroom"),         // the Glowing Mushroom: the glow bonus
         };
 
         /// <summary>Which creature means which prize, biggest first.</summary>

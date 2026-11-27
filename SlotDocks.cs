@@ -26,7 +26,10 @@ namespace LuckySpriggull
         /// the right symbols and celebrate *before* the winnings are paid.
         /// </summary>
         public const string SignalName = "Slot Result Signal";
-        /// <summary>Where the bet's coins wait until the lever is pulled (hidden; its count is shown above the coin slot).</summary>
+        /// <summary>
+        /// A hidden dock the server uses to tell every game its paytable (the four multipliers as one number; see
+        /// SlotMachine.EncodePaytable). It used to hold the bet; the name stays so placed machines keep working.
+        /// </summary>
         public const string BetName = "Slot Bet";
 
         private const BindingFlags Any = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
